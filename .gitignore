@@ -1,0 +1,21 @@
+# Each side-project under this repo also has its own .gitignore; these are repo-wide safety nets.
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.python-version
+
+# Virtual envs
+.venv/
+venv/
+
+# Local secrets / per-project run output
+.env
+out/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp

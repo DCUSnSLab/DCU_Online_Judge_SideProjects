@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "llm-code-review"
+version = "0.1.0"
+description = "Qualitative LLM-based review of student code submissions exported by lecture-code-review."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "dcu-llm @ file:///home/soobin/development/dcucode/sideproject",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+llm-code-review = "llm_code_review.cli:main"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/llm_code_review"]
