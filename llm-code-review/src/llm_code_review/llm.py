@@ -8,7 +8,7 @@ from typing import Any
 
 from dcu_llm import LLMClient, LLMClientError
 
-from llm_code_review.rubric import AXES
+from llm_code_review.rubric import AXES, overall_score, partial_score
 
 log = logging.getLogger(__name__)
 
@@ -20,13 +20,16 @@ class LLMResponseError(Exception):
     """Raised when the LLM response cannot be parsed into the expected schema."""
 
 
+# Qwen3 chat template option to disable reasoning content (the "thinking" mode).
+QWEN_NO_THINK_EXTRA = {"chat_template_kwargs": {"enable_thinking": False}}
+
+
 def _strip_fence(s: str) -> str:
     m = _FENCE.search(s)
     return m.group(1) if m else s
 
 
 def _largest_json_object(s: str) -> str | None:
-    """Return the largest top-level {...} substring."""
     best: tuple[int, int] | None = None
     depth = 0
     start = -1
@@ -45,20 +48,34 @@ def _largest_json_object(s: str) -> str | None:
     return s[best[0] : best[1]] if best else None
 
 
-def parse_response(text: str, *, total_score: int) -> dict[str, Any]:
-    """Extract and validate a JSON object from the LLM response text."""
+def extract_json_object(text: str) -> dict[str, Any]:
+    """Pull the largest top-level JSON object from a model response."""
     raw = _strip_fence(text).strip()
     candidate = raw if raw.startswith("{") else _largest_json_object(text)
     if not candidate:
         raise LLMResponseError("no JSON object in response")
-
     try:
         data = json.loads(candidate)
     except json.JSONDecodeError as e:
         raise LLMResponseError(f"invalid JSON: {e}") from e
-
     if not isinstance(data, dict):
         raise LLMResponseError("response is not a JSON object")
+    return data
+
+
+def _check_nonempty_str(value: Any, where: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise LLMResponseError(f"{where} must be a non-empty string")
+    return value.strip()
+
+
+def parse_response(text: str, *, total_score: int) -> dict[str, Any]:
+    """Validate Phase 2 schema and recompute overall/sps with the canonical formulas.
+
+    Always overrides model-provided overall/sps with formula values.
+    Records discrepancies in `recomputed` for debugging.
+    """
+    data = extract_json_object(text)
 
     scores = data.get("scores")
     comments = data.get("comments")
@@ -66,7 +83,7 @@ def parse_response(text: str, *, total_score: int) -> dict[str, Any]:
         raise LLMResponseError("missing 'scores' or 'comments' object")
 
     norm_scores: dict[str, int] = {}
-    norm_comments: dict[str, str] = {}
+    norm_comments: dict[str, dict[str, str]] = {}
     for axis in AXES:
         v = scores.get(axis)
         try:
@@ -74,49 +91,76 @@ def parse_response(text: str, *, total_score: int) -> dict[str, Any]:
         except (TypeError, ValueError):
             raise LLMResponseError(f"score for '{axis}' is not an int: {v!r}")
         norm_scores[axis] = max(0, min(10, iv))
-        norm_comments[axis] = str(comments.get(axis, "")).strip()
 
-    overall_v = data.get("overall")
-    try:
-        overall = max(0, min(100, int(overall_v)))
-    except (TypeError, ValueError):
-        # Recompute if missing or not int.
-        overall = round(sum(norm_scores.values()) / 40 * 100)
+        cobj = comments.get(axis)
+        if not isinstance(cobj, dict):
+            raise LLMResponseError(f"comments['{axis}'] must be an object with 'assessment' and 'suggestion'")
+        norm_comments[axis] = {
+            "assessment": _check_nonempty_str(cobj.get("assessment"), f"comments['{axis}'].assessment"),
+            "suggestion": _check_nonempty_str(cobj.get("suggestion"), f"comments['{axis}'].suggestion"),
+        }
 
-    sps = data.get("suggested_partial_score")
+    # Always recompute via canonical formulas. Model-provided values are kept for comparison only.
+    canonical_overall = overall_score(norm_scores)
+    canonical_sps = partial_score(total_score, norm_scores)
+
+    model_overall = data.get("overall")
+    model_sps = data.get("suggested_partial_score")
     try:
-        sps_int = int(sps)
+        model_overall_int = int(model_overall) if model_overall is not None else None
     except (TypeError, ValueError):
-        raise LLMResponseError(f"suggested_partial_score not int: {sps!r}")
-    sps_int = max(0, min(int(total_score), sps_int))
+        model_overall_int = None
+    try:
+        model_sps_int = int(model_sps) if model_sps is not None else None
+    except (TypeError, ValueError):
+        model_sps_int = None
+
+    recomputed: dict[str, Any] = {}
+    if model_overall_int is None or model_overall_int != canonical_overall:
+        recomputed["overall"] = {
+            "model": model_overall_int,
+            "formula": canonical_overall,
+            "diff": (canonical_overall - model_overall_int) if model_overall_int is not None else None,
+        }
+    if model_sps_int is None or model_sps_int != canonical_sps:
+        recomputed["suggested_partial_score"] = {
+            "model": model_sps_int,
+            "formula": canonical_sps,
+            "diff": (canonical_sps - model_sps_int) if model_sps_int is not None else None,
+        }
 
     return {
         "scores": norm_scores,
         "comments": norm_comments,
-        "overall": overall,
-        "summary": str(data.get("summary", "")).strip(),
-        "suggested_partial_score": sps_int,
+        "overall": canonical_overall,
+        "summary": _check_nonempty_str(data.get("summary"), "summary"),
+        "suggested_partial_score": canonical_sps,
+        "recomputed": recomputed,
     }
 
 
-# Qwen3 chat template option to disable reasoning content (the "thinking" mode).
-# Without this the model returns reasoning in message.reasoning_content and
-# leaves message.content empty, which OpenAI SDK exposes as "".
-_QWEN_NO_THINK_EXTRA = {"chat_template_kwargs": {"enable_thinking": False}}
+def _backoff(attempt: int) -> float:
+    return min(8.0, 1.5 ** attempt)
 
 
 def call_with_retry(
     client: LLMClient,
     messages: list[dict[str, str]],
     *,
+    parser,                     # callable: text -> parsed dict (raises LLMResponseError)
     model: str | None,
     temperature: float,
     max_tokens: int,
     retries: int,
-    total_score: int,
 ) -> tuple[dict[str, Any], str, int]:
-    """Returns (parsed, raw_text, latency_ms)."""
+    """Generic retry loop for any LLM call that returns a parseable JSON object.
+
+    Returns (parsed, raw_text, latency_ms).
+    On exhausted retries, raises LLMResponseError with `last_raw` attached as
+    attribute for debugging.
+    """
     last_err: Exception | None = None
+    last_raw: str = ""
     for attempt in range(retries + 1):
         try:
             t0 = time.monotonic()
@@ -125,10 +169,11 @@ def call_with_retry(
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                extra_body=_QWEN_NO_THINK_EXTRA,
+                extra_body=QWEN_NO_THINK_EXTRA,
             )
             latency_ms = int((time.monotonic() - t0) * 1000)
-            parsed = parse_response(text, total_score=total_score)
+            last_raw = text
+            parsed = parser(text)
             return parsed, text, latency_ms
         except LLMResponseError as e:
             last_err = e
@@ -137,5 +182,7 @@ def call_with_retry(
             last_err = e
             log.warning("attempt %d/%d: client error: %s", attempt + 1, retries + 1, e)
         if attempt < retries:
-            time.sleep(min(8.0, 1.5 ** attempt))
-    raise last_err if last_err else LLMResponseError("unknown failure")
+            time.sleep(_backoff(attempt))
+    err = last_err if last_err else LLMResponseError("unknown failure")
+    setattr(err, "last_raw", last_raw)
+    raise err

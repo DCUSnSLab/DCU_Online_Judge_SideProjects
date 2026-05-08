@@ -41,6 +41,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--max-tokens", type=int, default=None)
     p.add_argument("--concurrency", type=int, default=None, help="1..4 (default 4)")
     p.add_argument("--retries", type=int, default=None, help="LLM/parsing retries (default 2)")
+    p.add_argument(
+        "--no-ai-usage",
+        action="store_true",
+        help="Skip the AI-usage assessment pass (qualitative evaluation only).",
+    )
     p.add_argument("--dry-run", action="store_true", help="Build prompts only; no LLM calls.")
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args(argv)
@@ -79,7 +84,7 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
     tasks = list(build_tasks(input_dir, rows))
-    log.info("tasks: %d", len(tasks))
+    log.info("tasks: %d   ai_usage=%s", len(tasks), "off" if args.no_ai_usage else "on")
 
     cfg = load_config(
         profile_arg=args.profile,
@@ -88,6 +93,7 @@ def main(argv: list[str] | None = None) -> int:
         max_tokens_arg=args.max_tokens,
         concurrency_arg=args.concurrency,
         retries_arg=args.retries,
+        ai_usage_enabled=not args.no_ai_usage,
     )
 
     if args.dry_run:
@@ -97,12 +103,13 @@ def main(argv: list[str] | None = None) -> int:
 
     info = run_eval(out_dir, tasks, cfg, input_dir)
     log.info(
-        "done. evaluated=%d failed=%d elapsed=%ss",
+        "done. evaluated=%d eval_failed=%d ai_failed=%d elapsed=%ss",
         info["n_evaluated"],
-        info["n_failed"],
+        info["n_eval_failed"],
+        info["n_ai_usage_failed"],
         info["elapsed_seconds"],
     )
-    return 0 if info["n_failed"] == 0 else 1
+    return 0 if info["n_eval_failed"] == 0 else 1
 
 
 if __name__ == "__main__":

@@ -1,6 +1,8 @@
 .venv/
 .env
 out/
+out_*/
+_repeat/
 __pycache__/
 *.egg-info/
 *.pyc

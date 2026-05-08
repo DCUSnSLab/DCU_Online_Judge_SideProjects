@@ -8,7 +8,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class ProblemMeta:
-    label: str          # e.g. "P01"
+    label: str
     title: str
     description: str
     input_description: str
@@ -16,16 +16,14 @@ class ProblemMeta:
     samples: list[dict[str, Any]]
     hint: str | None
     languages: list[str]
-    time_limit: int     # ms
-    memory_limit: int   # MB
+    time_limit: int
+    memory_limit: int
     difficulty: str
     total_score: int
 
 
 @dataclass(frozen=True)
 class FinalSubmissionRow:
-    """A row from lecture-code-review's _meta/final_submissions.csv."""
-
     submission_id: str
     user_id: int
     username: str
@@ -38,7 +36,7 @@ class FinalSubmissionRow:
     time_cost_ms: int | None
     memory_cost_kb: int | None
     create_time: str | None
-    final_code_path: str    # relative to input_dir
+    final_code_path: str
 
 
 @dataclass(frozen=True)
@@ -50,10 +48,11 @@ class EvalTask:
 
 @dataclass
 class Evaluation:
-    """LLM-produced evaluation for a single (user, problem)."""
+    """LLM-produced qualitative evaluation for a single (user, problem)."""
 
     scores: dict[str, int]
-    comments: dict[str, str]
+    # Phase 2: comments are now a 2-key object per axis (assessment + suggestion).
+    comments: dict[str, dict[str, str]]
     overall: int
     summary: str
     suggested_partial_score: int
@@ -62,6 +61,9 @@ class Evaluation:
     model_used: str = ""
     error: str | None = None
 
+    # Phase 2: track when post-processing overrode model-provided overall/sps.
+    recomputed: dict[str, Any] = field(default_factory=dict)
+
     def to_dict(self) -> dict:
         return {
             "scores": self.scores,
@@ -69,6 +71,44 @@ class Evaluation:
             "overall": self.overall,
             "summary": self.summary,
             "suggested_partial_score": self.suggested_partial_score,
+            "model_used": self.model_used,
+            "llm_latency_ms": self.llm_latency_ms,
+            "error": self.error,
+            "recomputed": self.recomputed,
+        }
+
+
+@dataclass
+class AIUsageSignal:
+    category: str
+    observation: str
+    weight: str   # low | medium | high
+
+
+@dataclass
+class AIUsageAssessment:
+    """Companion assessment, ALWAYS kept separate from `Evaluation` and never
+    fed into score calculations. Reference signal for graders."""
+
+    likelihood_score: int          # [0, 100]
+    confidence: str                # low | medium | high
+    signals: list[AIUsageSignal]
+    counter_signals: list[str]
+    summary: str
+    disclaimer: str
+    raw_response: str = ""
+    llm_latency_ms: int = 0
+    model_used: str = ""
+    error: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "likelihood_score": self.likelihood_score,
+            "confidence": self.confidence,
+            "signals": [s.__dict__ for s in self.signals],
+            "counter_signals": self.counter_signals,
+            "summary": self.summary,
+            "disclaimer": self.disclaimer,
             "model_used": self.model_used,
             "llm_latency_ms": self.llm_latency_ms,
             "error": self.error,

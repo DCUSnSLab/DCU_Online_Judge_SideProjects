@@ -23,45 +23,75 @@ cp .env.example .env             # ONPREM_API_KEY 설정
 ```bash
 source .venv/bin/activate
 
-# Phase 1 검증: P01 한 학생 (스모크)
+# 스모크: 한 학생
 llm-code-review \
   --input ../lecture-code-review/out/lecture-388_contest-6181 \
   --problem P01 --username alswo6592
 
-# P01 전체 학생 (21명)
+# 한 문제 전체 학생 (정성평가 + AI-usage 평가 둘 다 수행)
 llm-code-review \
   --input ../lecture-code-review/out/lecture-388_contest-6181 \
   --problem P01
 
-# Dry-run (LLM 호출 없이 프롬프트만 prompts/ 에 저장)
+# AI-usage 평가 끄기 (LLM 호출 ~절반)
+llm-code-review --input <run> --problem P01 --no-ai-usage
+
+# 반복성 측정 (한 제출에 대해 N회 평가)
+python tools/repeatability.py \
+  --input ../lecture-code-review/out/lecture-388_contest-6181 \
+  --problem P01 --username alswo6592 --repeat 3
+
+# 산식 일관성 검증
+python tools/verify_consistency.py out/lecture-388_contest-6181
+
+# Dry-run
 llm-code-review --input <run> --problem P01 --dry-run
 ```
 
-## 출력 (Phase 1)
+## 출력 (Phase 2)
 
 `out/<input-run-name>/`
 
 ```
 _meta/
-├── rubric.json        # 사용한 4축 정의
-├── run_info.json      # 입력/모델/시각/처리수
-└── summary.csv        # 학생별·문제별: testcase 결과 + 4축 점수 + overall + 보상 점수
-evaluations/<user>/<P01>.json   # raw LLM 응답 + 사용한 메시지
-reports/<user>/<P01>.md         # 사람용 마크다운
-prompts/<user>/<P01>.md         # --dry-run 일 때만
+├── rubric.json            # 4축 정의 + 체크리스트 + 산식
+├── run_info.json          # 입력/모델/시각/처리수/AI-usage 통계
+└── summary.csv            # 학생-문제별: testcase + 4축 + overall + sps + AI-usage 컬럼
+evaluations/<user>/<P>.json    # 평가 raw + 파싱 결과 + ai_usage_assessment 형제 필드
+reports/<user>/<P>.md          # 사람용 마크다운 (점수표 + 축별 assessment/suggestion + AI-usage 섹션)
+prompts/<user>/<P>.md          # --dry-run 일 때만
 ```
 
-## 평가 루브릭
+## 평가 루브릭 (Phase 2)
 
-| 축 | 0–10 의미 |
+4개 축 (각 0~10) + 축별 체크리스트(`rubric.AXIS_CHECKLISTS`):
+
+| 축 | 의미 |
 |---|---|
-| `correctness` | 정상 입출력 + 코너케이스 (testcase 결과와 별개의 코드 단위 정합성) |
-| `algorithm` | 접근 방식의 적절성·효율성 |
-| `readability` | 네이밍·들여쓰기·함수 분리·주석 |
-| `problem_understanding` | 요구사항·제약조건 반영도 |
+| `correctness` | 변수 초기화·입출력 형식·미정의 동작·경계 케이스 — **testcase 통과와 독립적** |
+| `algorithm` | 접근 적절성·복잡도 |
+| `readability` | 네이밍·들여쓰기·구조·주석 (난이도가 낮으면 함수 분리 부재를 큰 감점으로 삼지 않음) |
+| `problem_understanding` | 입출력 형식·단위·정밀도·특수 조건 반영 |
 
-`overall = round(sum(scores) / 40 * 100)` (0~100).
-`suggested_partial_score`: 문제의 `total_score` 를 상한으로, 코드 의도가 맞다면 줄 수 있는 부분점수 (정수).
+각 축 코멘트는 `{assessment, suggestion}` 두 필드 모두 비공백 강제.
+
+산식 (`rubric.py` 단일 원천, 후처리에서 모델값을 산식값으로 무조건 덮어씀):
+
+```
+overall = round( (correctness + algorithm + readability + problem_understanding) / 40 * 100 )
+
+suggested_partial_score = round( total_score * (correctness + problem_understanding) / 20 )
+```
+
+`sps`는 의도·접근 정합성을 보는 두 축의 함수. `algorithm`/`readability`는 부분점수 결정 변수 아님.
+
+## AI 사용 가능성 평가 (Phase 2)
+
+별도 LLM 호출. 결과는 `ai_usage_assessment` 형제 필드에 저장되며 점수 계산에 영향 X.
+
+스키마: `likelihood_score(0-100)` + `confidence(low|medium|high)` + `signals[]` + **필수 `counter_signals[]`** + `summary` + `disclaimer`.
+
+마크다운 리포트에는 **"참고용 · 점수 미반영"** 라벨 + disclaimer 노출.
 
 ## 약속
 

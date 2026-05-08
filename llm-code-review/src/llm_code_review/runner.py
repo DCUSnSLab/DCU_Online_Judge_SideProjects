@@ -4,15 +4,13 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Iterable
 
 from dcu_llm import LLMClient
 
 from llm_code_review.config import Config
-from llm_code_review.evaluator import EvalContext, evaluate_task
+from llm_code_review.evaluator import EvalContext, TaskResult, evaluate_task
 from llm_code_review.models import EvalTask
 from llm_code_review.reporter import (
-    SUMMARY_FIELDS,
     now_iso,
     open_summary,
     summary_row,
@@ -35,11 +33,34 @@ def run_dry(out_dir: Path, tasks: list[EvalTask], cfg: Config, input_dir: Path) 
         "input_dir": str(input_dir),
         "model": cfg.model or "<profile-default>",
         "profile": cfg.profile,
+        "ai_usage_enabled": cfg.ai_usage_enabled,
         "started_at": now_iso(),
         "n_tasks": len(tasks),
     }
     write_run_info(out_dir, info)
     return info
+
+
+def _log_result(idx: int, total: int, r: TaskResult) -> None:
+    ai_str = ""
+    if r.ai_usage is not None:
+        if r.ai_usage.error:
+            ai_str = f"  ai_usage=ERROR ({r.ai_usage.error[:60]})"
+        else:
+            ai_str = f"  ai_usage={r.ai_usage.likelihood_score}/{r.ai_usage.confidence}"
+    err_str = f"  ERROR: {r.evaluation.error}" if r.evaluation.error else ""
+    log.info(
+        "[%d/%d] %s/%s overall=%s sps=%s ev_lat=%dms%s%s",
+        idx,
+        total,
+        r.task.submission.username,
+        r.task.problem.label,
+        r.evaluation.overall,
+        r.evaluation.suggested_partial_score,
+        r.evaluation.llm_latency_ms,
+        ai_str,
+        err_str,
+    )
 
 
 def run_eval(
@@ -56,56 +77,41 @@ def run_eval(
     ctx = EvalContext(cfg=cfg, client=client)
 
     n_evaluated = 0
-    n_failed = 0
+    n_eval_failed = 0
+    n_ai_failed = 0
 
     f_summary, w_summary = open_summary(out_dir)
     try:
         if cfg.concurrency > 1:
             with ThreadPoolExecutor(max_workers=cfg.concurrency) as ex:
                 futures = {ex.submit(evaluate_task, ctx, t): t for t in tasks}
-                for fut in as_completed(futures):
-                    t = futures[fut]
-                    ev = fut.result()
-                    write_evaluation_json(out_dir, t, ev)
-                    write_report_md(out_dir, t, ev)
-                    w_summary.writerow(summary_row(t, ev))
+                for i, fut in enumerate(as_completed(futures), 1):
+                    r = fut.result()
+                    write_evaluation_json(out_dir, r)
+                    write_report_md(out_dir, r)
+                    w_summary.writerow(summary_row(r.task, r.evaluation, r.ai_usage))
                     f_summary.flush()
-                    if ev.error:
-                        n_failed += 1
+                    if r.evaluation.error:
+                        n_eval_failed += 1
                     else:
                         n_evaluated += 1
-                    log.info(
-                        "[%d/%d] %s/%s overall=%s sps=%s%s",
-                        n_evaluated + n_failed,
-                        len(tasks),
-                        t.submission.username,
-                        t.problem.label,
-                        ev.overall,
-                        ev.suggested_partial_score,
-                        f"  ERROR: {ev.error}" if ev.error else "",
-                    )
+                    if r.ai_usage and r.ai_usage.error:
+                        n_ai_failed += 1
+                    _log_result(i, len(tasks), r)
         else:
             for i, t in enumerate(tasks, 1):
-                ev = evaluate_task(ctx, t)
-                write_evaluation_json(out_dir, t, ev)
-                write_report_md(out_dir, t, ev)
-                w_summary.writerow(summary_row(t, ev))
+                r = evaluate_task(ctx, t)
+                write_evaluation_json(out_dir, r)
+                write_report_md(out_dir, r)
+                w_summary.writerow(summary_row(r.task, r.evaluation, r.ai_usage))
                 f_summary.flush()
-                if ev.error:
-                    n_failed += 1
+                if r.evaluation.error:
+                    n_eval_failed += 1
                 else:
                     n_evaluated += 1
-                log.info(
-                    "[%d/%d] %s/%s overall=%s sps=%s latency=%dms%s",
-                    i,
-                    len(tasks),
-                    t.submission.username,
-                    t.problem.label,
-                    ev.overall,
-                    ev.suggested_partial_score,
-                    ev.llm_latency_ms,
-                    f"  ERROR: {ev.error}" if ev.error else "",
-                )
+                if r.ai_usage and r.ai_usage.error:
+                    n_ai_failed += 1
+                _log_result(i, len(tasks), r)
     finally:
         f_summary.close()
 
@@ -119,12 +125,14 @@ def run_eval(
         "max_tokens": cfg.max_tokens,
         "concurrency": cfg.concurrency,
         "retries": cfg.retries,
+        "ai_usage_enabled": cfg.ai_usage_enabled,
         "started_at": started,
         "finished_at": now_iso(),
         "elapsed_seconds": elapsed_s,
         "n_tasks": len(tasks),
         "n_evaluated": n_evaluated,
-        "n_failed": n_failed,
+        "n_eval_failed": n_eval_failed,
+        "n_ai_usage_failed": n_ai_failed,
     }
     write_run_info(out_dir, info)
     return info
