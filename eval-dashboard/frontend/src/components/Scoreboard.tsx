@@ -31,7 +31,9 @@ export function Scoreboard({ contestId, selection, onSelect }: Props) {
     selection.kind === "cell" && selection.userId === uid && selection.problemId === pid;
 
   return (
-    <div className="overflow-auto">
+    // h-full so the inner overflow-auto scrolls within the main pane,
+    // not the page body. The sticky header below relies on this.
+    <div className="h-full overflow-auto">
       <div className="px-4 py-3 border-b border-slate-200 bg-white sticky top-0 z-10">
         <div className="flex items-baseline gap-3 flex-wrap">
           <span className="font-semibold">{data.lecture.title}</span>

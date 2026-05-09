@@ -26,6 +26,13 @@ export const useLectures = (year: number | null, semester: number | null) =>
       (await api.get<Lecture[]>(`/years/${year}/semesters/${semester}/lectures`)).data,
   });
 
+export const useLecture = (lectureId: number | null) =>
+  useQuery({
+    queryKey: ["lecture", lectureId],
+    enabled: lectureId != null,
+    queryFn: async () => (await api.get<Lecture>(`/lectures/${lectureId}`)).data,
+  });
+
 export const useContests = (lectureId: number | null) =>
   useQuery({
     queryKey: ["contests", lectureId],
@@ -63,6 +70,38 @@ export const useEvalStatus = (contestId: number | null) =>
     enabled: contestId != null,
     queryFn: async () =>
       (await api.get<EvalStatus>(`/contests/${contestId}/eval-status`)).data,
+  });
+
+export type QueueSnapshot = {
+  slots_total: number;
+  slots_in_use: number;
+  queue_size: number;
+  running: {
+    job_id: string;
+    lecture_id: number;
+    contest_id: number;
+    requester_ids: string[];
+    n_done: number;
+    n_total: number;
+    started_at: string | null;
+  }[];
+  pending: {
+    job_id: string;
+    lecture_id: number;
+    contest_id: number;
+    requester_ids: string[];
+    queue_position: number;
+    enqueued_at: string | null;
+  }[];
+};
+
+export const useQueueSnapshot = () =>
+  useQuery({
+    queryKey: ["queue"],
+    queryFn: async () => (await api.get<QueueSnapshot>("/queue")).data,
+    refetchInterval: 3000,
+    refetchIntervalInBackground: false,
+    staleTime: 0,
   });
 
 export const useStartEval = (contestId: number | null) => {

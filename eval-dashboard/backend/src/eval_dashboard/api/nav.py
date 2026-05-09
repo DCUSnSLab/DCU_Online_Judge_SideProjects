@@ -35,3 +35,12 @@ def contests(lecture_id: int) -> list[Contest]:
             raise HTTPException(404, "lecture not found")
         rows = q.list_contests(c, lecture_id)
     return [Contest(**r) for r in rows]
+
+
+@router.get("/lectures/{lecture_id}")
+def get_lecture(lecture_id: int) -> Lecture:
+    with conn() as c:
+        row = q.get_lecture(c, lecture_id)
+    if not row:
+        raise HTTPException(404, "lecture not found")
+    return Lecture(**row)

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useEvalStatus, useStartEval } from "../api/hooks";
+import { useEvalStatus, useQueueSnapshot, useStartEval } from "../api/hooks";
+import { getRequesterId } from "../lib/session";
 
 type Props = { contestId: number | null };
 
@@ -27,24 +28,25 @@ type Progress = {
 export function EvalControls({ contestId }: Props) {
   const status = useEvalStatus(contestId);
   const startMut = useStartEval(contestId);
+  const queue = useQueueSnapshot();
   const qc = useQueryClient();
   const [progress, setProgress] = useState<Progress | null>(null);
   const esRef = useRef<EventSource | null>(null);
+  const myId = getRequesterId();
 
-  // Auto-attach to running job on mount.
+  // On contest change OR running_job_id update: detach old, clear UI,
+  // and re-attach if the new contest already has an active job.
+  // The server replays event history on subscribe, so navigating back to a
+  // running contest restores the full progress UI automatically.
   useEffect(() => {
-    if (!status.data?.running_job_id) return;
-    attach(status.data.running_job_id);
+    detach();
+    setProgress(null);
+    if (contestId != null && status.data?.running_job_id) {
+      attach(status.data.running_job_id);
+    }
     return () => detach();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status.data?.running_job_id]);
-
-  // Reset progress when contest changes.
-  useEffect(() => {
-    setProgress(null);
-    detach();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contestId]);
+  }, [contestId, status.data?.running_job_id]);
 
   const pushLog = (line: string) =>
     setProgress((p) => {
@@ -221,8 +223,71 @@ export function EvalControls({ contestId }: Props) {
     ? "bg-emerald-500"
     : "bg-blue-500";
 
+  const qs = queue.data;
+  const myJobs = qs
+    ? [
+        ...qs.running.filter((r) => r.requester_ids.includes(myId)),
+        ...qs.pending.filter((p) => p.requester_ids.includes(myId)),
+      ]
+    : [];
+
   return (
     <div className="border-t border-slate-200 p-4 space-y-2 bg-slate-50">
+      {qs && (
+        <div className="text-[11px] text-slate-600 bg-white border border-slate-200 rounded px-2 py-1.5 space-y-0.5">
+          <div className="flex justify-between">
+            <span>GPU 슬롯</span>
+            <span className="tabular-nums">
+              <span className={qs.slots_in_use >= qs.slots_total ? "text-rose-600 font-semibold" : "font-semibold"}>
+                {qs.slots_in_use}
+              </span>
+              /{qs.slots_total} 사용 · 대기 {qs.queue_size}
+            </span>
+          </div>
+          {qs.running.length > 0 && (
+            <details className="text-[10px] text-slate-500">
+              <summary className="cursor-pointer hover:text-slate-700">실행 중 contest 보기</summary>
+              <ul className="mt-1 space-y-0.5">
+                {qs.running.map((r) => (
+                  <li key={r.job_id} className="flex justify-between">
+                    <span>
+                      contest {r.contest_id}{" "}
+                      {r.requester_ids.includes(myId) && (
+                        <span className="text-blue-600 font-semibold">(나)</span>
+                      )}
+                    </span>
+                    <span className="tabular-nums">{r.n_done}/{r.n_total || "?"}</span>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+          {qs.pending.length > 0 && (
+            <details className="text-[10px] text-slate-500">
+              <summary className="cursor-pointer hover:text-slate-700">대기 중 contest 보기</summary>
+              <ul className="mt-1 space-y-0.5">
+                {qs.pending.map((p) => (
+                  <li key={p.job_id} className="flex justify-between">
+                    <span>
+                      contest {p.contest_id}{" "}
+                      {p.requester_ids.includes(myId) && (
+                        <span className="text-blue-600 font-semibold">(나)</span>
+                      )}
+                    </span>
+                    <span className="tabular-nums">{p.queue_position}번째</span>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+          {myJobs.length > 0 && (
+            <div className="text-[10px] text-blue-600 mt-0.5">
+              내 진행 중·대기 job: {myJobs.length}개
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="text-xs text-slate-500">
         평가 캐시: {status.data?.n_evaluated ?? "-"}건
         {status.data?.last_run_at && (

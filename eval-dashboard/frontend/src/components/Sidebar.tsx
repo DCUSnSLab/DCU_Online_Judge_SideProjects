@@ -1,10 +1,10 @@
-import { useEffect } from "react";
 import {
   useContests,
   useLectures,
   useSemesters,
   useYears,
 } from "../api/hooks";
+import { shortRequesterLabel } from "../lib/session";
 
 type Props = {
   year: number | null;
@@ -25,14 +25,24 @@ export function Sidebar({ year, semester, lectureId, contestId, onChange }: Prop
   const lectures = useLectures(year, semester);
   const contests = useContests(lectureId);
 
-  // Reset downstream when upstream changes.
-  useEffect(() => { onChange({ semester: null, lectureId: null, contestId: null }); }, [year]);   // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { onChange({ lectureId: null, contestId: null }); }, [semester]);                // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { onChange({ contestId: null }); }, [lectureId]);                                // eslint-disable-line react-hooks/exhaustive-deps
+  // Cascade-reset is handled in App's onChange so that a programmatic full
+  // jump (e.g. from MyJobsBanner) can set all four levels at once without
+  // races. Sidebar just reports user picks as partial updates.
 
   return (
-    <aside className="w-72 shrink-0 border-r border-slate-200 bg-white p-4 flex flex-col gap-4">
-      <h1 className="text-lg font-semibold tracking-tight">eval-dashboard</h1>
+    // Width/border/background are owned by the parent column wrapper in App.tsx
+    // (so the wrapper can apply overflow-y-auto). This `<aside>` only handles
+    // its own internal padding and field layout.
+    <aside className="p-4 flex flex-col gap-4">
+      <div>
+        <h1 className="text-lg font-semibold tracking-tight">eval-dashboard</h1>
+        <div
+          className="mt-0.5 inline-block text-[10px] font-mono text-slate-500 bg-slate-100 rounded px-1.5 py-0.5"
+          title="이 브라우저의 requester ID. 다른 브라우저/시크릿창은 다른 ID."
+        >
+          내 ID: {shortRequesterLabel()}
+        </div>
+      </div>
 
       <Field label="년도">
         <Select
