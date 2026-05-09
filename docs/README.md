@@ -15,6 +15,9 @@
 | [`04-deploy.md`](./04-deploy.md) | Deploy compose 비교, 현재 가동 중인 devstack 셋업, scripts, sideproject/dcu_llm, backupdata |
 | [`05-extension-points.md`](./05-extension-points.md) | 1차 목적 3축별 확장 포인트 인덱스 — 파일경로 + 결합도 표기 |
 | [`06-project-layout.md`](./06-project-layout.md) | 사이드 프로젝트 격리 원칙과 권장 디렉토리 레이아웃 |
+| [`07-eval-system-summary.md`](./07-eval-system-summary.md) | **DCUCODE 이식용** — 3개 사이드 프로젝트(lecture-code-review / llm-code-review / eval-dashboard) 전체 요약, 데이터 흐름, 핵심 설계 결정 |
+| [`08-api-and-events.md`](./08-api-and-events.md) | **DCUCODE 이식용** — eval-dashboard backend 의 REST API + SSE 이벤트 계약 (스키마 포함) |
+| [`09-dcucode-integration.md`](./09-dcucode-integration.md) | **DCUCODE 이식용** — DCUCODE 본체에 흡수하는 단계별 가이드. 통합 옵션 비교, 코드 매핑, 의존성 정리, 단계별 작업 |
 
 ## 1차 목적 3축 (사이드 프로젝트 후보 매핑용)
 
