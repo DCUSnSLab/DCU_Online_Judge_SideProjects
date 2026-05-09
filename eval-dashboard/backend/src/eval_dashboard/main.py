@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from eval_dashboard import eval_runner
 from eval_dashboard.api import eval as eval_api
 from eval_dashboard.api import nav, scoreboard
 from eval_dashboard.config import get_settings
@@ -17,6 +19,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_pool()
+    eval_runner.set_event_loop(asyncio.get_running_loop())
     yield
     close_pool()
 

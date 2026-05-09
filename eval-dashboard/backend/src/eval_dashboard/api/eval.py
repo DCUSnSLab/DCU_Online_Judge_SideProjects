@@ -73,7 +73,7 @@ async def stream(job_id: str):
         raise HTTPException(404, "job not found")
 
     async def event_generator():
-        for ev in eval_runner.event_iter(job):
+        async for ev in eval_runner.event_iter(job):
             yield {"event": ev["event"], "data": json.dumps(ev["data"])}
 
     return EventSourceResponse(event_generator())

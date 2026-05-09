@@ -4,25 +4,23 @@ Job state is in-memory: this Phase 1 deliberately avoids Redis/Celery.
 A Job has:
   - status:   queued | running | done | failed
   - n_total / n_done / n_failed
-  - a Queue[Event] for SSE streaming
+  - an asyncio.Queue[Event] for SSE streaming (thread-safe via call_soon_threadsafe)
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
-import queue
 import re
 import shlex
 import shutil
 import subprocess
 import threading
-import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Iterator
+from typing import AsyncIterator
 
 from eval_dashboard import eval_store
 from eval_dashboard.config import get_settings
@@ -50,17 +48,43 @@ class Job:
     started_at: str = ""
     finished_at: str = ""
     error: str | None = None
-    events: queue.Queue = field(default_factory=queue.Queue)
+    # Buffer of historical events so a late SSE subscriber sees what already happened.
+    history: list[dict] = field(default_factory=list)
+    # Per-subscriber asyncio queues. The producer thread fans events out via
+    # loop.call_soon_threadsafe(queue.put_nowait, ...). All entries are pruned
+    # when the job ends.
+    subscribers: list[asyncio.Queue] = field(default_factory=list)
 
 
 _jobs: dict[str, Job] = {}
 _jobs_lock = threading.Lock()
+_main_loop: asyncio.AbstractEventLoop | None = None
 # Track currently running job per contest, to enforce single-flight.
 _active_by_contest: dict[int, str] = {}
 
 
+def set_event_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """Called from FastAPI lifespan startup so the producer thread can schedule
+    asyncio.Queue.put_nowait on the right loop."""
+    global _main_loop
+    _main_loop = loop
+
+
 def _emit(job: Job, event_type: str, payload: dict) -> None:
-    job.events.put({"event": event_type, "data": payload})
+    ev = {"event": event_type, "data": payload}
+    # 1) keep the last N events for late subscribers (cap to avoid unbounded growth).
+    job.history.append(ev)
+    if len(job.history) > 500:
+        del job.history[: len(job.history) - 500]
+    # 2) fan out to subscribers via main loop.
+    if _main_loop is None:
+        return
+    for q in list(job.subscribers):
+        try:
+            _main_loop.call_soon_threadsafe(q.put_nowait, ev)
+        except RuntimeError:
+            # loop might be closing
+            pass
 
 
 def _shell_lecture_cr(lecture_id: int, contest_id: int) -> tuple[int, str]:
@@ -125,8 +149,10 @@ def _run_llm_cr(job: Job, problem: str | None, usernames: list[str] | None) -> i
     if not venv_python.is_file():
         return 1
     input_dir = eval_store.lecture_cr_run_dir(job.lecture_id, job.contest_id)
+    # `-u` forces unbuffered stdout/stderr so we can read progress lines in real time.
     cmd = [
         str(venv_python),
+        "-u",
         "-m",
         "llm_code_review",
         "--input",
@@ -144,15 +170,22 @@ def _run_llm_cr(job: Job, problem: str | None, usernames: list[str] | None) -> i
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        bufsize=1,                # line-buffered
-        env={**os.environ},
+        bufsize=1,                # parent-side line buffering on read
+        env={
+            **os.environ,
+            # Belt-and-suspenders alongside `-u`: any nested Python process inherits
+            # this and stays unbuffered, so logging.StreamHandler flushes per record.
+            "PYTHONUNBUFFERED": "1",
+        },
     )
     assert proc.stdout is not None
     for raw_line in proc.stdout:
         line = raw_line.rstrip()
+        if not line:
+            continue
         m = _PROGRESS_RE.search(line)
         if m:
-            n_local, total_local, username, plabel, overall, sps = m.group(1), m.group(2), m.group(3), m.group(4), m.group(5), m.group(6)
+            username, plabel, overall, sps = m.group(3), m.group(4), m.group(5), m.group(6)
             ev_lat = m.group(7)
             ai_str = m.group(8)
             job.n_done += 1
@@ -171,9 +204,15 @@ def _run_llm_cr(job: Job, problem: str | None, usernames: list[str] | None) -> i
                     "log_line": line[:500],
                 },
             )
+            log.debug("progress %d/%d %s/%s", job.n_done, job.n_total, username, plabel)
         elif "ERROR" in line and "evaluate" in line:
             job.n_failed += 1
             _emit(job, "warn", {"message": line[:500]})
+        else:
+            # Forward any other interesting line as a low-noise log message
+            # (visible in the GUI's collapsible log tail).
+            if "INFO" in line or "WARN" in line or "ERROR" in line:
+                _emit(job, "log", {"line": line[:500]})
     rc = proc.wait()
     return rc
 
@@ -273,15 +312,34 @@ def get_active_for_contest(contest_id: int) -> Job | None:
         return _jobs.get(jid) if jid else None
 
 
-def event_iter(job: Job, ping_interval: float = 15.0) -> Iterator[dict]:
-    """Yield events from job.events queue. Sends keepalive pings on idle.
-    Terminates after a 'done' or 'error' event."""
-    while True:
-        try:
-            ev = job.events.get(timeout=ping_interval)
-        except queue.Empty:
-            yield {"event": "ping", "data": {"ts": time.time()}}
-            continue
+async def event_iter(job: Job, ping_interval: float = 10.0) -> AsyncIterator[dict]:
+    """Async generator: yield events for one SSE subscriber.
+
+    Each subscriber has its own asyncio.Queue, fed by the producer thread via
+    loop.call_soon_threadsafe. The history buffer is replayed on connect so
+    clients that subscribe mid-flight see prior events too.
+    Terminates after a 'done' or 'error' event.
+    """
+    # Replay history so a late subscriber sees prior events.
+    for ev in list(job.history):
         yield ev
         if ev["event"] in ("done", "error"):
-            break
+            return
+
+    q: asyncio.Queue = asyncio.Queue()
+    job.subscribers.append(q)
+    try:
+        while True:
+            try:
+                ev = await asyncio.wait_for(q.get(), timeout=ping_interval)
+            except asyncio.TimeoutError:
+                yield {"event": "ping", "data": {"ts": "keepalive"}}
+                continue
+            yield ev
+            if ev["event"] in ("done", "error"):
+                break
+    finally:
+        try:
+            job.subscribers.remove(q)
+        except ValueError:
+            pass
