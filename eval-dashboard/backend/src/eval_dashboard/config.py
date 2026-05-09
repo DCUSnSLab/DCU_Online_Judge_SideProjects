@@ -17,11 +17,16 @@ class Settings:
     lecture_cr_dir: Path
     llm_cr_dir: Path
     cors_origins: tuple[str, ...]
+    max_concurrent_eval_jobs: int
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     load_dotenv()
+    try:
+        max_concurrent = max(1, int(os.environ.get("MAX_CONCURRENT_EVAL_JOBS", "3")))
+    except ValueError:
+        max_concurrent = 3
     return Settings(
         pg_dsn=os.environ.get("PG_DSN") or _DEFAULT_DSN,
         lecture_cr_dir=Path(os.environ.get("LECTURE_CR_DIR", "")).resolve(),
@@ -29,4 +34,5 @@ def get_settings() -> Settings:
         cors_origins=tuple(
             o.strip() for o in (os.environ.get("CORS_ORIGINS") or "http://localhost:5173").split(",") if o.strip()
         ),
+        max_concurrent_eval_jobs=max_concurrent,
     )

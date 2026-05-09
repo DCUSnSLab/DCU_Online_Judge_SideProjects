@@ -4,6 +4,13 @@ import { useEvalStatus, useStartEval } from "../api/hooks";
 
 type Props = { contestId: number | null };
 
+type QueueState = {
+  position: number;
+  size: number;
+  slots_in_use: number;
+  slots_total: number;
+};
+
 type Progress = {
   n: number;
   total: number;
@@ -13,6 +20,8 @@ type Progress = {
   done?: boolean;
   skipped?: boolean;
   error?: string;
+  queue?: QueueState | null;     // set while waiting for a GPU slot, cleared on `started`
+  joinedExisting?: boolean;       // POST said this requester joined an in-flight job
 };
 
 export function EvalControls({ contestId }: Props) {
@@ -49,6 +58,37 @@ export function EvalControls({ contestId }: Props) {
     pushLog(`SSE 연결 → job ${jobId.slice(0, 8)}`);
     const es = new EventSource(`/api/jobs/${jobId}/stream`);
     esRef.current = es;
+    es.addEventListener("queued", (e) => {
+      const data = JSON.parse((e as MessageEvent).data);
+      setProgress((p) => ({
+        ...(p ?? { n: 0, total: 0 }),
+        stage: "대기열에 있음",
+        queue: {
+          position: data.queue_position,
+          size: data.queue_size,
+          slots_in_use: data.slots_in_use,
+          slots_total: data.slots_total,
+        },
+      }));
+      pushLog(
+        `queued · ${data.queue_position}번째 / GPU ${data.slots_in_use}/${data.slots_total} 사용 중`,
+      );
+    });
+    es.addEventListener("queue-update", (e) => {
+      const data = JSON.parse((e as MessageEvent).data);
+      setProgress((p) => {
+        if (!p?.queue) return p;
+        return {
+          ...p,
+          queue: {
+            position: data.queue_position,
+            size: data.queue_size,
+            slots_in_use: data.slots_in_use,
+            slots_total: data.slots_total ?? p.queue.slots_total,
+          },
+        };
+      });
+    });
     es.addEventListener("started", (e) => {
       const data = JSON.parse((e as MessageEvent).data);
       setProgress((p) => ({
@@ -56,8 +96,9 @@ export function EvalControls({ contestId }: Props) {
         n: 0,
         total: data.n_total ?? 0,
         stage: "시작",
+        queue: null,    // GPU 슬롯 획득 → 대기 표시 클리어
       }));
-      pushLog(`started · 예상 ${data.n_total ?? 0}건`);
+      pushLog(`started · 예상 ${data.n_total ?? 0}건 · GPU 슬롯 ${data.slots_in_use ?? "-"}/${data.slots_total ?? "-"}`);
     });
     es.addEventListener("stage", (e) => {
       const data = JSON.parse((e as MessageEvent).data);
@@ -138,7 +179,15 @@ export function EvalControls({ contestId }: Props) {
     setProgress({ n: 0, total: 0, stage: "요청 중...", logTail: [] });
     try {
       const res = await startMut.mutateAsync(force);
-      pushLog(`POST /qualitative-eval (force=${force}) → n_to_run=${res.n_to_run}`);
+      const joined = (res as { joined_existing?: boolean }).joined_existing ?? false;
+      pushLog(
+        `POST /qualitative-eval (force=${force}) → n_to_run=${res.n_to_run}` +
+          (joined ? "  (기존 진행 중인 job 에 합류)" : ""),
+      );
+      setProgress((p) => ({
+        ...(p ?? { n: 0, total: 0 }),
+        joinedExisting: joined,
+      }));
       // If server replied n_to_run=0 we're going to see skipped; tell the user proactively.
       if (res.n_to_run === 0 && !force) {
         setProgress((p) => ({
@@ -199,6 +248,20 @@ export function EvalControls({ contestId }: Props) {
 
       {progress && (
         <div className="space-y-1.5 mt-2 rounded border border-slate-200 bg-white p-2.5">
+          {progress.joinedExisting && (
+            <div className="text-[11px] text-slate-600 bg-slate-100 rounded px-1.5 py-1">
+              ℹ 다른 요청자가 시작한 동일 contest 의 평가에 합류했습니다.
+            </div>
+          )}
+
+          {progress.queue && !progress.done && !progress.error && (
+            <div className="rounded bg-amber-50 border border-amber-200 px-2 py-1.5 text-xs text-amber-900">
+              ⏳ 대기 중 — <span className="font-semibold">{progress.queue.position}번째</span> ·
+              {" "}전체 대기 {progress.queue.size}건 · GPU 슬롯{" "}
+              <span className="font-semibold">{progress.queue.slots_in_use}/{progress.queue.slots_total}</span> 사용 중
+            </div>
+          )}
+
           <div className="flex justify-between text-xs">
             <span className={progress.error ? "text-rose-700" : progress.skipped ? "text-slate-700" : "text-slate-700 font-medium"}>
               {progress.stage ?? "진행 중"}

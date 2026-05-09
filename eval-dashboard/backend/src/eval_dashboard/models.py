@@ -86,6 +86,10 @@ class EvalJobStarted(BaseModel):
     n_total: int
     n_already_evaluated: int
     n_to_run: int
+    joined_existing: bool = False
+    queue_position: int | None = None     # 1-based; None if running already
+    slots_in_use: int = 0
+    slots_total: int = 0
 
 
 class EvalStatus(BaseModel):
@@ -94,3 +98,30 @@ class EvalStatus(BaseModel):
     n_pairs: int
     last_run_at: datetime | None = None
     running_job_id: str | None = None
+
+
+class QueueRunningItem(BaseModel):
+    job_id: str
+    lecture_id: int
+    contest_id: int
+    requester_ids: list[str] = []
+    n_done: int = 0
+    n_total: int = 0
+    started_at: str | None = None
+
+
+class QueuePendingItem(BaseModel):
+    job_id: str
+    lecture_id: int
+    contest_id: int
+    requester_ids: list[str] = []
+    queue_position: int
+    enqueued_at: str | None = None
+
+
+class QueueSnapshot(BaseModel):
+    slots_total: int
+    slots_in_use: int
+    queue_size: int
+    running: list[QueueRunningItem] = []
+    pending: list[QueuePendingItem] = []

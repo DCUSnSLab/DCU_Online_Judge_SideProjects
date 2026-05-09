@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
 from eval_dashboard import eval_runner, eval_store, queries as q
 from eval_dashboard.db import conn
-from eval_dashboard.models import EvalJobStarted, EvalStartRequest, EvalStatus
+from eval_dashboard.models import (
+    EvalJobStarted,
+    EvalStartRequest,
+    EvalStatus,
+    QueueSnapshot,
+)
 
 router = APIRouter()
 
@@ -38,14 +44,18 @@ def eval_status(contest_id: int) -> EvalStatus:
     return EvalStatus(
         has_lecture_export=has_export,
         n_evaluated=len(pairs),
-        n_pairs=0,  # filled by frontend from scoreboard if needed; cheap to keep 0 here
+        n_pairs=0,
         last_run_at=last_run_at,
-        running_job_id=active.id if active and active.status == "running" else None,
+        running_job_id=active.id if active and active.status in ("queued", "running") else None,
     )
 
 
 @router.post("/contests/{contest_id}/qualitative-eval")
-def start_eval(contest_id: int, body: EvalStartRequest | None = None) -> EvalJobStarted:
+def start_eval(
+    contest_id: int,
+    body: EvalStartRequest | None = None,
+    x_requester: Annotated[str | None, Header(alias="X-Requester")] = None,
+) -> EvalJobStarted:
     body = body or EvalStartRequest()
     with conn() as c:
         contest = q.get_contest(c, contest_id)
@@ -53,17 +63,26 @@ def start_eval(contest_id: int, body: EvalStartRequest | None = None) -> EvalJob
             raise HTTPException(404, "contest not found")
         lecture_id = contest["lecture_id"]
 
-    active = eval_runner.get_active_for_contest(contest_id)
-    if active and active.status in ("queued", "running"):
-        raise HTTPException(409, f"job already running: {active.id}")
-
-    job = eval_runner.start_job(lecture_id, contest_id, force=body.force)
+    job, joined = eval_runner.start_job(
+        lecture_id, contest_id, force=body.force, requester_id=x_requester
+    )
+    sched = eval_runner.get_scheduler()
+    pos = sched.position_of(job)
     return EvalJobStarted(
         job_id=job.id,
         n_total=job.n_total,
-        n_already_evaluated=0,    # client reads from /eval-status separately if needed
+        n_already_evaluated=0,
         n_to_run=job.n_total,
+        joined_existing=joined,
+        queue_position=pos,
+        slots_in_use=sched.slots_in_use(),
+        slots_total=sched.slots_total,
     )
+
+
+@router.get("/queue")
+def queue_snapshot() -> QueueSnapshot:
+    return QueueSnapshot(**eval_runner.queue_snapshot())
 
 
 @router.get("/jobs/{job_id}/stream")
@@ -84,6 +103,7 @@ def get_job(job_id: str) -> dict:
     job = eval_runner.get_job(job_id)
     if not job:
         raise HTTPException(404, "job not found")
+    sched = eval_runner.get_scheduler()
     return {
         "id": job.id,
         "lecture_id": job.lecture_id,
@@ -95,5 +115,8 @@ def get_job(job_id: str) -> dict:
         "n_failed": job.n_failed,
         "started_at": job.started_at,
         "finished_at": job.finished_at,
+        "enqueued_at": job.enqueued_at,
         "error": job.error,
+        "requester_ids": list(job.requester_ids),
+        "queue_position": sched.position_of(job),
     }
